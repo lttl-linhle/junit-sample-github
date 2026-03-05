@@ -4,7 +4,8 @@ on:
     inputs:
       TEST_EXECUTION_KEY:
         description: "Test Execution Key from Jira"
-
+      PROJECT_KEY:
+        description: "Project Key truyền từ Jira"
 env:
   # Đảm bảo các giá trị này đã được cài trong Settings > Secrets and variables
   BASE_URL: ${{ vars.BASE_URL }}
