@@ -33,7 +33,7 @@ jobs:
         if: always()
         run: |
           # Lấy Token xác thực
-          TOKEN=$(curl -s "$BASE_AUTH_URL/api/apikeys/authenticate" \
+          TOKEN=$(curl -s "$BASE_AUTH_URL/ds/apikeys/authenticate" \
             -H 'Content-Type:application/json' \
             -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" | tr -d '"')
           
@@ -43,7 +43,7 @@ jobs:
           FILE_PATH=$(find target/surefire-reports -name "TEST-*.xml" | head -n 1)
           
           # Upload kết quả
-          curl --http1.1 -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=${{ github.event.inputs.TEST_EXECUTION_KEY }}" \
+          curl -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=${{ github.event.inputs.TEST_EXECUTION_KEY }}" \
             -H "Content-Type:application/xml" \
             -H "Authorization:JWT $TOKEN" \
             --data-binary "@$FILE_PATH"
