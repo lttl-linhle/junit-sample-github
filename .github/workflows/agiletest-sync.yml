@@ -13,12 +13,15 @@ env:
   CLIENT_ID: ${{ secrets.CLIENT_ID }}
   CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
   PROJECT_KEY: ${{ github.event.inputs.PROJECT_KEY || vars.PROJECT_KEY }}
+  TEST_EXECUTION_KEY: ${{ github.event.inputs.TEST_EXECUTION_KEY }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
@@ -27,48 +30,62 @@ jobs:
           cache: maven
 
       - name: Execute Tests
-        run: mvn test -Dmaven.test.failure.ignore=true
+        run: mvn test
+
+      - name: Debug Token
+        run: |
+          RAW=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H 'Content-Type:application/json' \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}")
+          echo "RAW: [$RAW]"
+          echo "RAW_LENGTH: ${#RAW}"
 
       - name: Submit to AgileTest
         if: always()
         run: |
-          # Lấy Token xác thực
-          TOKEN=$(curl -s "$BASE_AUTH_URL/ds/apikeys/authenticate" \
+          TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
             -H 'Content-Type:application/json' \
-            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" | tr -d '"')
-          
-          if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then echo "Token rỗng!"; exit 1; fi
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
+            | tr -d '"' | tr -d '\n' | tr -d '\r' | tr -d ' ')
 
-          # Tìm file kết quả
-          FILE_PATH=$(find target/surefire-reports -name "TEST-*.xml" | head -n 1)
-          
-          # Upload kết quả
-          curl -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=${{ github.event.inputs.TEST_EXECUTION_KEY }}" \
-            -H "Content-Type:application/xml" \
-            -H "Authorization:JWT $TOKEN" \
-            --data-binary "@$FILE_PATH"
+          echo "TOKEN length: ${#TOKEN}"
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+            echo "Token rong!"; exit 1
+          fi
+
+          for FILE in $(find target/surefire-reports -name "TEST-*.xml"); do
+            echo "Uploading: $FILE"
+            RESPONSE=$(curl -s -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=$TEST_EXECUTION_KEY" \
+              -H "Content-Type:application/xml" \
+              -H "Authorization:JWT $TOKEN" \
+              --data-binary "@$FILE")
+            echo "Response: $RESPONSE"
+          done
 
       - name: Update Pipeline Status
         if: always()
+        env:
+          JOB_RESULT: ${{ job.status }}
         run: |
-          if [ "${{ job.status }}" == "success" ]; then
+          if [ "$JOB_RESULT" == "success" ]; then
             RESULT="success"
           else
             RESULT="failed"
           fi
-          
-          TOKEN=$(curl -s "$BASE_AUTH_URL/api/apikeys/authenticate" \
-            -X POST -H 'Content-Type:application/json' \
-            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" | tr -d '"')
 
-          JOB_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H 'Content-Type:application/json' \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
+            | tr -d '"' | tr -d '\n' | tr -d '\r' | tr -d ' ')
 
-          curl -X POST "$BASE_AUTH_URL/ds/test-executions/${{ github.event.inputs.TEST_EXECUTION_KEY }}/pipeline/history?projectKey=$PROJECT_KEY" \
+          if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+            echo "Token rong!"; exit 1
+          fi
+
+          JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          curl -s -X POST "$BASE_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
             -H "Content-Type: application/json" \
             -H "Authorization: JWT $TOKEN" \
-            --data "{
-              \"jobURL\": \"$JOB_URL\",
-              \"repository\": \"${{ github.repository }}\",
-              \"tool\": \"github\",
-              \"result\": \"$RESULT\"
-            }"
+            --data "{\"jobURL\":\"$JOB_URL\",\"repository\":\"$GITHUB_REPOSITORY\",\"tool\":\"github\",\"result\":\"$RESULT\"}"
