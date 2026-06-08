@@ -32,19 +32,11 @@ jobs:
       - name: Execute Tests
         id: run_tests
         run: mvn test
-
-      - name: Debug Token
-        run: |
-          RAW=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
-            -H 'Content-Type:application/json' \
-            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}")
-          echo "RAW: [$RAW]"
-          echo "RAW_LENGTH: ${#RAW}"
+        continue-on-error: true   # ← QUAN TRỌNG: cho phép chạy tiếp dù test fail
 
       - name: Submit to AgileTest
+        id: submit_agiletest       # ← thêm id để track outcome
         if: always()
-        env:
-          TEST_RESULT: ${{ steps.run_tests.outcome }}
         run: |
           TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
             -H 'Content-Type:application/json' \
@@ -57,25 +49,43 @@ jobs:
             echo "Token rong!"; exit 1
           fi
 
+          UPLOAD_FAILED=0
+
           for FILE in $(find target/surefire-reports -name "TEST-*.xml"); do
             echo "Uploading: $FILE"
             RESPONSE=$(curl -s -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=$TEST_EXECUTION_KEY" \
-              -H "Content-Type:application/xml" \
-              -H "Authorization:JWT $TOKEN" \
+              -H "Content-Type: application/xml" \
+              -H "Authorization: JWT $TOKEN" \
               --data-binary "@$FILE")
             echo "Response: $RESPONSE"
+
+            # Kiểm tra nếu response có lỗi
+            if echo "$RESPONSE" | grep -q '"error"'; then
+              echo "Upload FAILED for $FILE"
+              UPLOAD_FAILED=1
+            fi
           done
+
+          if [ "$UPLOAD_FAILED" -eq 1 ]; then
+            echo "One or more uploads failed"
+            exit 1   # ← làm step này fail → outcome = failure
+          fi
+
+          echo "All uploads successful"
 
       - name: Update Pipeline Status
         if: always()
         env:
-          JOB_RESULT: ${{ job.status }}
+          UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}  # ← dựa vào upload, không phải test
         run: |
-          if [ "$JOB_RESULT" == "success" ]; then
+          # success chỉ khi upload lên AgileTest thành công
+          if [ "$UPLOAD_RESULT" == "success" ]; then
             RESULT="success"
           else
             RESULT="failed"
           fi
+
+          echo "Upload outcome: $UPLOAD_RESULT → Pipeline result: $RESULT"
 
           TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
             -H 'Content-Type:application/json' \
@@ -88,7 +98,14 @@ jobs:
 
           JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          curl -s -X POST "$BASE_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
+          RESPONSE=$(curl -s -X POST "$BASE_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
             -H "Content-Type: application/json" \
             -H "Authorization: JWT $TOKEN" \
-            --data "{\"jobURL\":\"$JOB_URL\",\"repository\":\"$GITHUB_REPOSITORY\",\"tool\":\"github\",\"result\":\"$RESULT\"}"
+            --data "{\"jobURL\":\"$JOB_URL\",\"repository\":\"$GITHUB_REPOSITORY\",\"tool\":\"github\",\"result\":\"$RESULT\"}")
+
+          echo "Pipeline update response: $RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"error"'; then
+            echo "Failed to update pipeline status"
+            exit 1
+          fi
