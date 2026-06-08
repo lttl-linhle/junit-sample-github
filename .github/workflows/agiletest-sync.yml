@@ -98,7 +98,7 @@ jobs:
 
           JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          RESPONSE=$(curl -s -X POST "$BASE_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
+          RESPONSE=$(curl -s -X POST "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
             -H "Content-Type: application/json" \
             -H "Authorization: JWT $TOKEN" \
             --data "{\"jobURL\":\"$JOB_URL\",\"repository\":\"$GITHUB_REPOSITORY\",\"tool\":\"github\",\"result\":\"$RESULT\"}")
