@@ -30,6 +30,7 @@ jobs:
           cache: maven
 
       - name: Execute Tests
+        id: run_tests
         run: mvn test
 
       - name: Debug Token
@@ -42,6 +43,8 @@ jobs:
 
       - name: Submit to AgileTest
         if: always()
+        env:
+          TEST_RESULT: ${{ steps.run_tests.outcome }}
         run: |
           TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
             -H 'Content-Type:application/json' \
