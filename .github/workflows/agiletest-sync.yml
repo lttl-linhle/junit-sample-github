@@ -97,23 +97,15 @@ jobs:
           fi
 
           JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-
-          # Lấy các thông tin cần thiết từ môi trường GitHub
           BRANCH_NAME="${GITHUB_REF_NAME}"
           AUTHOR="${GITHUB_ACTOR}"
-          
+
+          # Gửi API cập nhật history với chuỗi JSON dạng Single-line chuẩn hóa theo mẫu
           RESPONSE=$(curl -s -X POST "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
             -H "Content-Type: application/json" \
             -H "Authorization: JWT $TOKEN" \
-            --data "{
-              \"jobURL\":\"$JOB_URL\",
-              \"repository\":\"$GITHUB_REPOSITORY\",
-              \"tool\":\"github\",
-              \"result\":\"$RESULT\",
-              \"branchName\":\"$BRANCH_NAME\",
-              \"author\":\"$AUTHOR\"
-            }")
-            
+            --data '{"jobURL":"'"$JOB_URL"'", "repository":"'"$GITHUB_REPOSITORY"'", "tool":"github", "result":"'"$RESULT"'", "branchName":"'"$BRANCH_NAME"'", "author":"'"$AUTHOR"'"}' )
+
           echo "Pipeline update response: $RESPONSE"
 
           if echo "$RESPONSE" | grep -q '"error"'; then
