@@ -4,8 +4,16 @@ on:
     inputs:
       TEST_EXECUTION_KEY:
         description: "Test Execution Key from Jira"
+        required: false
       PROJECT_KEY:
         description: "Project Key from Jira"
+        required: true
+      milestoneId:
+        description: "Milestone ID passed from AgileTest"
+        required: false
+      testPlanKeys:
+        description: "Test Plan Keys passed from AgileTest (e.g. TP-1,TP-2)"
+        required: false
 
 env:
   BASE_URL: ${{ vars.BASE_URL }}
@@ -14,6 +22,9 @@ env:
   CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
   PROJECT_KEY: ${{ github.event.inputs.PROJECT_KEY || vars.PROJECT_KEY }}
   TEST_EXECUTION_KEY: ${{ github.event.inputs.TEST_EXECUTION_KEY }}
+  # Khai báo biến môi trường từ inputs mới
+  MILESTONE_ID: ${{ github.event.inputs.milestoneId }}
+  TEST_PLAN_KEYS: ${{ github.event.inputs.testPlanKeys }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -32,10 +43,10 @@ jobs:
       - name: Execute Tests
         id: run_tests
         run: mvn test
-        continue-on-error: true   # ← QUAN TRỌNG: cho phép chạy tiếp dù test fail
+        continue-on-error: true   # ← Cho phép chạy tiếp dù test fail để còn sync báo cáo
 
       - name: Submit to AgileTest
-        id: submit_agiletest       # ← thêm id để track outcome
+        id: submit_agiletest       
         if: always()
         run: |
           TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
@@ -49,17 +60,38 @@ jobs:
             echo "Token rong!"; exit 1
           fi
 
+          # 1. TỰ ĐỘNG XÂY DỰNG URL UPLOAD DỰA TRÊN CÁC THAM SỐ ĐẦU VÀO ĐỘNG
+          UPLOAD_URL="$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY"
+          
+          if [ -not -z "$TEST_EXECUTION_KEY" ]; then
+            UPLOAD_URL="${UPLOAD_URL}&testExecutionKey=${TEST_EXECUTION_KEY}"
+          fi
+          
+          # Nếu App có truyền milestoneId sang, gắn thêm vào URL
+          if [ -not -z "$MILESTONE_ID" ]; then
+            UPLOAD_URL="${UPLOAD_URL}&milestoneId=${MILESTONE_ID}"
+            echo "Gắn thêm tham số Milestone ID: $MILESTONE_ID"
+          fi
+          
+          # Nếu App có truyền testPlanKeys sang, gắn thêm vào URL
+          if [ -not -z "$TEST_PLAN_KEYS" ]; then
+            UPLOAD_URL="${UPLOAD_URL}&testPlanKeys=${TEST_PLAN_KEYS}"
+            echo "Gắn thêm tham số Test Plan Keys: $TEST_PLAN_KEYS"
+          fi
+
+          echo "Final Target Upload URL: $UPLOAD_URL"
+
           UPLOAD_FAILED=0
 
           for FILE in $(find target/surefire-reports -name "TEST-*.xml"); do
             echo "Uploading: $FILE"
-            RESPONSE=$(curl -s -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=$TEST_EXECUTION_KEY" \
+            # Thực hiện gọi API bằng URL động đã cấu trúc ở trên
+            RESPONSE=$(curl -s -X POST "$UPLOAD_URL" \
               -H "Content-Type: application/xml" \
               -H "Authorization: JWT $TOKEN" \
               --data-binary "@$FILE")
             echo "Response: $RESPONSE"
 
-            # Kiểm tra nếu response có lỗi
             if echo "$RESPONSE" | grep -q '"error"'; then
               echo "Upload FAILED for $FILE"
               UPLOAD_FAILED=1
@@ -68,7 +100,7 @@ jobs:
 
           if [ "$UPLOAD_FAILED" -eq 1 ]; then
             echo "One or more uploads failed"
-            exit 1   # ← làm step này fail → outcome = failure
+            exit 1   
           fi
 
           echo "All uploads successful"
@@ -76,9 +108,8 @@ jobs:
       - name: Update Pipeline Status
         if: always()
         env:
-          UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}  # ← dựa vào upload, không phải test
+          UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}  
         run: |
-          # success chỉ khi upload lên AgileTest thành công
           if [ "$UPLOAD_RESULT" == "success" ]; then
             RESULT="success"
           else
@@ -100,7 +131,7 @@ jobs:
           BRANCH_NAME="${GITHUB_REF_NAME}"
           AUTHOR="${GITHUB_ACTOR}"
 
-          # Gửi API cập nhật history với chuỗi JSON dạng Single-line chuẩn hóa theo mẫu
+          # Lưu ý: Endpoint history giữ nguyên cấu trúc cũ vì nó chỉ ghi nhận log chạy của hạ tầng CI/CD
           RESPONSE=$(curl -s -X POST "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
             -H "Content-Type: application/json" \
             -H "Authorization: JWT $TOKEN" \
