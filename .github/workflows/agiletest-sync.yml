@@ -5,7 +5,7 @@ on:
     inputs:
       TEST_EXECUTION_KEY:
         description: "Test Execution Key from Jira"
-        required: true
+        required: false
         type: string
 
       PROJECT_KEY:
@@ -61,14 +61,23 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$PROJECT_KEY" ]; then
+            echo "PROJECT_KEY is empty!"
+            exit 1
+          fi
+
+          if [ -z "$TEST_EXECUTION_KEY" ]; then
+            echo "TEST_EXECUTION_KEY is empty!"
+            exit 1
+          fi
+
           UPLOAD_FAILED=0
+          FILE_FOUND=0
 
           if [ ! -d "target/surefire-reports" ]; then
             echo "Directory target/surefire-reports does not exist."
             exit 1
           fi
-
-          FILE_FOUND=0
 
           while IFS= read -r -d '' FILE; do
             FILE_FOUND=1
@@ -87,6 +96,7 @@ jobs:
               echo "Upload FAILED for $FILE"
               UPLOAD_FAILED=1
             fi
+
           done < <(find target/surefire-reports -name "TEST-*.xml" -print0)
 
           if [ "$FILE_FOUND" -eq 0 ]; then
