@@ -1,114 +1,146 @@
 name: AgileTest Sync
+
 on:
-  workflow_dispatch:
-    inputs:
-      TEST_EXECUTION_KEY:
-        description: "Test Execution Key from Jira"
-      PROJECT_KEY:
-        description: "Project Key from Jira"
+  workflow_dispatch:
+    inputs:
+      TEST_EXECUTION_KEY:
+        description: "Test Execution Key from Jira"
+        required: true
+        type: string
+
+      PROJECT_KEY:
+        description: "Project Key from Jira"
+        required: false
+        type: string
 
 env:
-  BASE_URL: ${{ vars.BASE_URL }}
-  BASE_AUTH_URL: ${{ vars.BASE_AUTH_URL }}
-  CLIENT_ID: ${{ secrets.CLIENT_ID }}
-  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-  PROJECT_KEY: ${{ github.event.inputs.PROJECT_KEY || vars.PROJECT_KEY }}
-  TEST_EXECUTION_KEY: ${{ github.event.inputs.TEST_EXECUTION_KEY }}
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  BASE_URL: ${{ vars.BASE_URL }}
+  BASE_AUTH_URL: ${{ vars.BASE_AUTH_URL }}
+  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+  PROJECT_KEY: ${{ inputs.PROJECT_KEY || vars.PROJECT_KEY }}
+  TEST_EXECUTION_KEY: ${{ inputs.TEST_EXECUTION_KEY }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  run-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  run-test:
+    runs-on: ubuntu-latest
 
-      - name: Setup JDK
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: maven
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Execute Tests
-        id: run_tests
-        run: mvn test
-        continue-on-error: true   # ← QUAN TRỌNG: cho phép chạy tiếp dù test fail
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
 
-      - name: Submit to AgileTest
-        id: submit_agiletest       # ← thêm id để track outcome
-        if: always()
-        run: |
-            TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
-              -H 'Content-Type:application/json' \
-              -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
-              | tr -d '"' | tr -d '\n' | tr -d '\r' | tr -d ' ')
-  
-            echo "TOKEN length: ${#TOKEN}"
-  
-            if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
-              echo "Token rong!"; exit 1
-            fi
-  
-            UPLOAD_FAILED=0
+      - name: Execute Tests
+        id: run_tests
+        run: mvn test
+        continue-on-error: true
 
-            for FILE in $(find target/surefire-reports -name "TEST-*.xml"); do
-              echo "Uploading: $FILE"
-              RESPONSE=$(curl -s -X POST "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=$TEST_EXECUTION_KEY" \
-                -H "Content-Type: application/xml" \
-                -H "Authorization: JWT $TOKEN" \
-                --data-binary "@$FILE")
-              echo "Response: $RESPONSE"
-  
-              # Kiểm tra nếu response có lỗi
-              if echo "$RESPONSE" | grep -q '"error"'; then
-                echo "Upload FAILED for $FILE"
-                UPLOAD_FAILED=1
-              fi
-            done
-  
-            if [ "$UPLOAD_FAILED" -eq 1 ]; then
-              echo "One or more uploads failed"
-              exit 1   # ← làm step này fail → outcome = failure
-            fi
-  
-            echo "All uploads successful"
-  
-        - name: Update Pipeline Status
-          if: always()
-          env:
-            UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}  # ← dựa vào upload, không phải test
-          run: |
-            # success chỉ khi upload lên AgileTest thành công
-            if [ "$UPLOAD_RESULT" == "success" ]; then
-              RESULT="success"
-            else
-              RESULT="failed"
-            fi
-  
-            echo "Upload outcome: $UPLOAD_RESULT → Pipeline result: $RESULT"
-  
-            TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
-              -H 'Content-Type:application/json' \
-              -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
-              | tr -d '"' | tr -d '\n' | tr -d '\r' | tr -d ' ')
-  
-            if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
-              echo "Token rong!"; exit 1
-            fi
-  
-            JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            BRANCH_NAME="${GITHUB_REF_NAME}"
-            AUTHOR="${GITHUB_ACTOR}"
-  
-            # Gửi API cập nhật history với chuỗi JSON dạng Single-line chuẩn hóa theo mẫu
-            RESPONSE=$(curl -s -X POST "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
-              -H "Content-Type: application/json" \
-              -H "Authorization: JWT $TOKEN" \
-              --data '{"jobURL":"'"$JOB_URL"'", "repository":"'"$GITHUB_REPOSITORY"'", "tool":"github", "result":"'"$RESULT"'", "branchName":"'"$BRANCH_NAME"'", "author":"'"$AUTHOR"'"}' )
-  
-            echo "Pipeline update response: $RESPONSE"
-  
-            if echo "$RESPONSE" | grep -q '"error"'; then
-              echo "Failed to update pipeline status"
-              exit 1
-            fi
+      - name: Submit to AgileTest
+        id: submit_agiletest
+        if: always()
+        run: |
+          TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
+            | tr -d '"' \
+            | tr -d '\n' \
+            | tr -d '\r' \
+            | tr -d ' ')
+
+          echo "TOKEN length: ${#TOKEN}"
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Token rong!"
+            exit 1
+          fi
+
+          UPLOAD_FAILED=0
+
+          if [ ! -d "target/surefire-reports" ]; then
+            echo "Directory target/surefire-reports does not exist."
+            exit 1
+          fi
+
+          FILE_FOUND=0
+
+          while IFS= read -r -d '' FILE; do
+            FILE_FOUND=1
+
+            echo "Uploading: $FILE"
+
+            RESPONSE=$(curl -s -X POST \
+              "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=$TEST_EXECUTION_KEY" \
+              -H "Content-Type: application/xml" \
+              -H "Authorization: JWT $TOKEN" \
+              --data-binary "@$FILE")
+
+            echo "Response: $RESPONSE"
+
+            if echo "$RESPONSE" | grep -q '"error"'; then
+              echo "Upload FAILED for $FILE"
+              UPLOAD_FAILED=1
+            fi
+          done < <(find target/surefire-reports -name "TEST-*.xml" -print0)
+
+          if [ "$FILE_FOUND" -eq 0 ]; then
+            echo "No JUnit XML files found in target/surefire-reports."
+            exit 1
+          fi
+
+          if [ "$UPLOAD_FAILED" -eq 1 ]; then
+            echo "One or more uploads failed."
+            exit 1
+          fi
+
+          echo "All uploads successful."
+
+      - name: Update Pipeline Status
+        if: always()
+        env:
+          UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}
+        run: |
+          if [ "$UPLOAD_RESULT" = "success" ]; then
+            RESULT="success"
+          else
+            RESULT="failed"
+          fi
+
+          echo "Upload outcome: $UPLOAD_RESULT"
+          echo "Pipeline result: $RESULT"
+
+          TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
+            | tr -d '"' \
+            | tr -d '\n' \
+            | tr -d '\r' \
+            | tr -d ' ')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Token rong!"
+            exit 1
+          fi
+
+          JOB_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          AUTHOR="${GITHUB_ACTOR}"
+
+          RESPONSE=$(curl -s -X POST \
+            "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: JWT $TOKEN" \
+            --data "{\"jobURL\":\"$JOB_URL\",\"repository\":\"$GITHUB_REPOSITORY\",\"tool\":\"github\",\"result\":\"$RESULT\",\"branchName\":\"$BRANCH_NAME\",\"author\":\"$AUTHOR\"}")
+
+          echo "Pipeline update response: $RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"error"'; then
+            echo "Failed to update pipeline status."
+            exit 1
+          fi
