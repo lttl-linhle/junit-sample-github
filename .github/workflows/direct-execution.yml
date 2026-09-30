@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       TEST_EXECUTION_KEY:
-        description: "Sub Test Execution Key (bỏ trống để tạo mới dưới parent)"
+        description: "Sub Test Execution Key có sẵn (bỏ trống để tự tạo mới dưới PARENT_KEY)"
         required: false
         type: string
-      PARENT_ID:
-        description: "Parent issue ID (Story, Task...) chứa Sub Test Execution"
-        required: true
+      PARENT_KEY:
+        description: "Key của issue cha (vd: PROJ-123). Bắt buộc nếu bỏ trống TEST_EXECUTION_KEY"
+        required: false
         type: string
       PROJECT_KEY:
         description: "Project Key from Jira"
@@ -22,8 +22,7 @@ env:
   CLIENT_ID: ${{ secrets.CLIENT_ID }}
   CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
   PROJECT_KEY: ${{ inputs.PROJECT_KEY || vars.PROJECT_KEY }}
-  INPUT_TEST_EXECUTION_KEY: ${{ inputs.TEST_EXECUTION_KEY }}
-  PARENT_ID: ${{ inputs.PARENT_ID }}
+  PARENT_KEY: ${{ inputs.PARENT_KEY }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -41,6 +40,62 @@ jobs:
           distribution: "temurin"
           cache: maven
 
+      # Parser chưa hỗ trợ parentId, nên tự tạo Sub Test Execution (Direct Execution) qua Jira API
+      - name: Prepare Sub Test Execution
+        id: prepare_execution
+        env:
+          INPUT_TEST_EXECUTION_KEY: ${{ inputs.TEST_EXECUTION_KEY }}
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          DIRECT_EXECUTION_ISSUE_TYPE_ID: ${{ vars.DIRECT_EXECUTION_ISSUE_TYPE_ID }}
+        run: |
+          if [ -z "$PROJECT_KEY" ]; then
+            echo "PROJECT_KEY is empty!"
+            exit 1
+          fi
+
+          # Đã có key sẵn thì dùng luôn
+          if [ -n "$INPUT_TEST_EXECUTION_KEY" ]; then
+            echo "Dung Sub Test Execution co san: $INPUT_TEST_EXECUTION_KEY"
+            echo "test_execution_key=$INPUT_TEST_EXECUTION_KEY" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$PARENT_KEY" ]; then
+            echo "Phai truyen TEST_EXECUTION_KEY hoac PARENT_KEY!"
+            exit 1
+          fi
+
+          if [ -z "$DIRECT_EXECUTION_ISSUE_TYPE_ID" ]; then
+            echo "Chua cau hinh vars.DIRECT_EXECUTION_ISSUE_TYPE_ID!"
+            exit 1
+          fi
+
+          BODY=$(jq -n \
+            --arg project "$PROJECT_KEY" \
+            --arg parent "$PARENT_KEY" \
+            --arg issuetype "$DIRECT_EXECUTION_ISSUE_TYPE_ID" \
+            --arg summary "Execution results - ${GITHUB_REPOSITORY} #${GITHUB_RUN_NUMBER} (${GITHUB_REF_NAME})" \
+            '{fields: {project: {key: $project}, parent: {key: $parent}, issuetype: {id: $issuetype}, summary: $summary}}')
+
+          HTTP_CODE=$(curl -s -o create.json -w "%{http_code}" -X POST \
+            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$JIRA_BASE_URL/rest/api/3/issue" \
+            --data "$BODY")
+
+          echo "Create issue: HTTP $HTTP_CODE - $(cat create.json)"
+
+          KEY=$(jq -r '.key // empty' create.json)
+          if [ "$HTTP_CODE" -ge 400 ] || [ -z "$KEY" ]; then
+            echo "Tao Sub Test Execution that bai!"
+            exit 1
+          fi
+
+          echo "Da tao Sub Test Execution $KEY duoi $PARENT_KEY"
+          echo "test_execution_key=$KEY" >> "$GITHUB_OUTPUT"
+
       - name: Execute Tests
         id: run_tests
         run: mvn test
@@ -48,7 +103,9 @@ jobs:
 
       - name: Submit to AgileTest
         id: submit_agiletest
-        if: always()
+        if: always() && steps.prepare_execution.outputs.test_execution_key != ''
+        env:
+          TEST_EXECUTION_KEY: ${{ steps.prepare_execution.outputs.test_execution_key }}
         run: |
           TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
             -H "Content-Type: application/json" \
@@ -63,37 +120,20 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$PROJECT_KEY" ]; then
-            echo "PROJECT_KEY is empty!"
-            exit 1
-          fi
-
-          if [ -z "$PARENT_ID" ]; then
-            echo "PARENT_ID is empty!"
-            exit 1
-          fi
-
           if [ ! -d "target/surefire-reports" ]; then
             echo "Directory target/surefire-reports does not exist."
             exit 1
           fi
 
-          TEST_EXECUTION_KEY="$INPUT_TEST_EXECUTION_KEY"
           UPLOAD_FAILED=0
           FILE_FOUND=0
-
-          # Ghép query string; testExecutionKey là tùy chọn
-          QUERY="projectKey=$PROJECT_KEY&parentId=$PARENT_ID"
-          if [ -n "$TEST_EXECUTION_KEY" ]; then
-            QUERY="$QUERY&testExecutionKey=$TEST_EXECUTION_KEY"
-          fi
 
           while IFS= read -r -d '' FILE; do
             FILE_FOUND=1
             echo "Uploading: $FILE"
 
             HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" -X POST \
-              "$BASE_URL/ds/test-executions/junit?$QUERY" \
+              "$BASE_URL/ds/test-executions/junit?projectKey=$PROJECT_KEY&testExecutionKey=$TEST_EXECUTION_KEY" \
               -H "Content-Type: application/xml" \
               -H "Authorization: JWT $TOKEN" \
               --data-binary "@$FILE")
@@ -103,23 +143,8 @@ jobs:
             if [ "$HTTP_CODE" -ge 400 ] || grep -q '"error"' response.json; then
               echo "Upload FAILED for $FILE"
               UPLOAD_FAILED=1
-              continue
-            fi
-
-            # Lần đầu tạo mới: lấy key sub execution vừa tạo để các file sau dùng chung
-            if [ -z "$TEST_EXECUTION_KEY" ]; then
-              TEST_EXECUTION_KEY=$(jq -r '.key // .testExecutionKey // empty' response.json)
-              if [ -z "$TEST_EXECUTION_KEY" ]; then
-                echo "Khong lay duoc test execution key tu response. Kiem tra lai ten field."
-                exit 1
-              fi
-              echo "Created sub test execution: $TEST_EXECUTION_KEY"
-              QUERY="$QUERY&testExecutionKey=$TEST_EXECUTION_KEY"
             fi
           done < <(find target/surefire-reports -name "TEST-*.xml" -print0)
-
-          # Truyền key sang bước sau
-          echo "test_execution_key=$TEST_EXECUTION_KEY" >> "$GITHUB_OUTPUT"
 
           if [ "$FILE_FOUND" -eq 0 ]; then
             echo "No JUnit XML files found in target/surefire-reports."
@@ -134,17 +159,12 @@ jobs:
           echo "All uploads successful."
 
       - name: Update Pipeline Status
-        if: always()
+        if: always() && steps.prepare_execution.outputs.test_execution_key != ''
         env:
+          TEST_EXECUTION_KEY: ${{ steps.prepare_execution.outputs.test_execution_key }}
           UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}
           TEST_RESULT: ${{ steps.run_tests.outcome }}
-          TEST_EXECUTION_KEY: ${{ steps.submit_agiletest.outputs.test_execution_key || inputs.TEST_EXECUTION_KEY }}
         run: |
-          if [ -z "$TEST_EXECUTION_KEY" ]; then
-            echo "Khong co TEST_EXECUTION_KEY, bo qua cap nhat pipeline status."
-            exit 1
-          fi
-
           if [ "$UPLOAD_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ]; then
             RESULT="success"
           else
@@ -176,7 +196,7 @@ jobs:
             '{jobURL: $jobURL, repository: $repository, tool: "github", result: $result, branchName: $branchName, author: $author}')
 
           HTTP_CODE=$(curl -s -o pipeline.json -w "%{http_code}" -X POST \
-            "$BASE_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
+            "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/histories?projectKey=$PROJECT_KEY" \
             -H "Content-Type: application/json" \
             -H "Authorization: JWT $TOKEN" \
             --data "$BODY")
