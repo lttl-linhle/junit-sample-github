@@ -1,0 +1,189 @@
+name: AgileTest Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      TEST_EXECUTION_KEY:
+        description: "Sub Test Execution Key (bỏ trống để tạo mới dưới parent)"
+        required: false
+        type: string
+      PARENT_ID:
+        description: "Parent issue ID (Story, Task...) chứa Sub Test Execution"
+        required: true
+        type: string
+      PROJECT_KEY:
+        description: "Project Key from Jira"
+        required: false
+        type: string
+
+env:
+  BASE_URL: ${{ vars.BASE_URL }}
+  BASE_AUTH_URL: ${{ vars.BASE_AUTH_URL }}
+  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+  PROJECT_KEY: ${{ inputs.PROJECT_KEY || vars.PROJECT_KEY }}
+  INPUT_TEST_EXECUTION_KEY: ${{ inputs.TEST_EXECUTION_KEY }}
+  PARENT_ID: ${{ inputs.PARENT_ID }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+
+      - name: Execute Tests
+        id: run_tests
+        run: mvn test
+        continue-on-error: true
+
+      - name: Submit to AgileTest
+        id: submit_agiletest
+        if: always()
+        run: |
+          TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
+            | tr -d '"\n\r ')
+
+          echo "::add-mask::$TOKEN"
+          echo "TOKEN length: ${#TOKEN}"
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Token rong!"
+            exit 1
+          fi
+
+          if [ -z "$PROJECT_KEY" ]; then
+            echo "PROJECT_KEY is empty!"
+            exit 1
+          fi
+
+          if [ -z "$PARENT_ID" ]; then
+            echo "PARENT_ID is empty!"
+            exit 1
+          fi
+
+          if [ ! -d "target/surefire-reports" ]; then
+            echo "Directory target/surefire-reports does not exist."
+            exit 1
+          fi
+
+          TEST_EXECUTION_KEY="$INPUT_TEST_EXECUTION_KEY"
+          UPLOAD_FAILED=0
+          FILE_FOUND=0
+
+          # Ghép query string; testExecutionKey là tùy chọn
+          QUERY="projectKey=$PROJECT_KEY&parentId=$PARENT_ID"
+          if [ -n "$TEST_EXECUTION_KEY" ]; then
+            QUERY="$QUERY&testExecutionKey=$TEST_EXECUTION_KEY"
+          fi
+
+          while IFS= read -r -d '' FILE; do
+            FILE_FOUND=1
+            echo "Uploading: $FILE"
+
+            HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" -X POST \
+              "$BASE_URL/ds/test-executions/junit?$QUERY" \
+              -H "Content-Type: application/xml" \
+              -H "Authorization: JWT $TOKEN" \
+              --data-binary "@$FILE")
+
+            echo "HTTP $HTTP_CODE - $(cat response.json)"
+
+            if [ "$HTTP_CODE" -ge 400 ] || grep -q '"error"' response.json; then
+              echo "Upload FAILED for $FILE"
+              UPLOAD_FAILED=1
+              continue
+            fi
+
+            # Lần đầu tạo mới: lấy key sub execution vừa tạo để các file sau dùng chung
+            if [ -z "$TEST_EXECUTION_KEY" ]; then
+              TEST_EXECUTION_KEY=$(jq -r '.key // .testExecutionKey // empty' response.json)
+              if [ -z "$TEST_EXECUTION_KEY" ]; then
+                echo "Khong lay duoc test execution key tu response. Kiem tra lai ten field."
+                exit 1
+              fi
+              echo "Created sub test execution: $TEST_EXECUTION_KEY"
+              QUERY="$QUERY&testExecutionKey=$TEST_EXECUTION_KEY"
+            fi
+          done < <(find target/surefire-reports -name "TEST-*.xml" -print0)
+
+          # Truyền key sang bước sau
+          echo "test_execution_key=$TEST_EXECUTION_KEY" >> "$GITHUB_OUTPUT"
+
+          if [ "$FILE_FOUND" -eq 0 ]; then
+            echo "No JUnit XML files found in target/surefire-reports."
+            exit 1
+          fi
+
+          if [ "$UPLOAD_FAILED" -eq 1 ]; then
+            echo "One or more uploads failed."
+            exit 1
+          fi
+
+          echo "All uploads successful."
+
+      - name: Update Pipeline Status
+        if: always()
+        env:
+          UPLOAD_RESULT: ${{ steps.submit_agiletest.outcome }}
+          TEST_RESULT: ${{ steps.run_tests.outcome }}
+          TEST_EXECUTION_KEY: ${{ steps.submit_agiletest.outputs.test_execution_key || inputs.TEST_EXECUTION_KEY }}
+        run: |
+          if [ -z "$TEST_EXECUTION_KEY" ]; then
+            echo "Khong co TEST_EXECUTION_KEY, bo qua cap nhat pipeline status."
+            exit 1
+          fi
+
+          if [ "$UPLOAD_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ]; then
+            RESULT="success"
+          else
+            RESULT="failed"
+          fi
+
+          echo "Test outcome: $TEST_RESULT"
+          echo "Upload outcome: $UPLOAD_RESULT"
+          echo "Pipeline result: $RESULT"
+
+          TOKEN=$(curl -s -X POST "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" \
+            | tr -d '"\n\r ')
+
+          echo "::add-mask::$TOKEN"
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Token rong!"
+            exit 1
+          fi
+
+          BODY=$(jq -n \
+            --arg jobURL "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg result "$RESULT" \
+            --arg branchName "$GITHUB_REF_NAME" \
+            --arg author "$GITHUB_ACTOR" \
+            '{jobURL: $jobURL, repository: $repository, tool: "github", result: $result, branchName: $branchName, author: $author}')
+
+          HTTP_CODE=$(curl -s -o pipeline.json -w "%{http_code}" -X POST \
+            "$BASE_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/history?projectKey=$PROJECT_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: JWT $TOKEN" \
+            --data "$BODY")
+
+          echo "Pipeline update: HTTP $HTTP_CODE - $(cat pipeline.json)"
+
+          if [ "$HTTP_CODE" -ge 400 ] || grep -q '"error"' pipeline.json; then
+            echo "Failed to update pipeline status."
+            exit 1
+          fi
