@@ -187,13 +187,15 @@ jobs:
             exit 1
           fi
 
+          # Schema github yêu cầu bắt buộc: repository + runId (jobURL chỉ dành cho GitLab)
           BODY=$(jq -n \
-            --arg jobURL "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --arg repository "$GITHUB_REPOSITORY" \
+            --arg tool "github" \
             --arg result "$RESULT" \
-            --arg branchName "$GITHUB_REF_NAME" \
-            --arg author "$GITHUB_ACTOR" \
-            '{jobURL: $jobURL, repository: $repository, tool: "github", result: $result, branchName: $branchName, author: $author}')
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg runId "$GITHUB_RUN_ID" \
+            '{tool: $tool, result: $result, repository: $repository, runId: $runId}')
+
+          echo "Pipeline body: $BODY"
 
           HTTP_CODE=$(curl -s -o pipeline.json -w "%{http_code}" -X POST \
             "$BASE_AUTH_URL/ds/test-executions/$TEST_EXECUTION_KEY/pipeline/histories?projectKey=$PROJECT_KEY" \
